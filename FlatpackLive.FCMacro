@@ -1,0 +1,21 @@
+# Flatpack live view: rebuilds the model in FreeCAD every time you save a .py file.
+# Run from Macro > Macros... (set "User macros location" to this folder), or `./fp live models/x.py`.
+import os
+import sys
+
+import FreeCADGui
+
+REPO = os.path.dirname(os.path.abspath(__file__))
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+# Stop any running session, then reload the live module itself so edits to it apply.
+old = getattr(FreeCADGui, "_flatpack_live", None)
+if old is not None:
+    old.stop()
+for name in [n for n in sys.modules if n == "flatpack" or n.startswith("flatpack.")]:
+    del sys.modules[name]
+
+import flatpack.live
+
+flatpack.live.main()
