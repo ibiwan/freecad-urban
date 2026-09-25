@@ -1,18 +1,19 @@
-from math import cos, pi, sin
-
 from foot import foot
-from shared import board_thickness, hinge_radius, rect_around, rect_forward
+from shared import (
+    board_thickness,
+    hinge_radius,
+    lower_leg_height,
+    n_gon,
+    pin_diameter,
+    rect_around,
+    rect_forward,
+)
 
 from flatpack import t
 
 skel_width = 1.5
-skel_len = 2.125
+skel_len = lower_leg_height - hinge_radius
 skel_depth = 1
-
-
-def _n_gon(n, r, i):
-    theta = 2 * pi / n * i
-    return (r * cos(theta), r * sin(theta))
 
 
 def _shin_slat(width, len, short=True):
@@ -40,9 +41,9 @@ def _stab():
 
 def cross_riser():
     rect_forward(
-        t.up(hinge_radius / 2 - board_thickness).nose_down(90),
+        t.up(hinge_radius / 2).nose_down(90),
         skel_width - 2 * board_thickness,
-        skel_len + hinge_radius - board_thickness * 2,
+        skel_len + hinge_radius,
     ).chip()
 
 
@@ -54,7 +55,7 @@ def lower():
         rect_forward(t_left, skel_depth, skel_len)
         + t_left.circle(0, 0, hinge_radius)
         + t_left.circle(0, skel_len, hinge_radius)
-    ).chip()
+    ).chip(punch=["knee-pin", "ankle-pin"])
 
     # right riser with hinge bosses
     t_right = t.left(skel_width / 2 - board_thickness).nose_down(90).roll_right(90)
@@ -63,7 +64,7 @@ def lower():
         rect_forward(t_right, skel_depth, skel_len)
         + t_right.circle(0, 0, hinge_radius)
         + t_right.circle(0, skel_len, hinge_radius)
-    ).chip()
+    ).chip(punch=["knee-pin", "ankle-pin"])
 
     # cross risers
     t.back(2 * board_thickness).place(cross_riser)
@@ -76,8 +77,8 @@ def lower():
     w2 = t.down(skel_len - board_thickness).wire().jump(r, 0, "v0")
     for i in range(1, 9):
         lbl = f"v{i}"
-        w1 = w1.line(*_n_gon(8, r, i), lbl)
-        w2 = w2.line(*_n_gon(8, r, i), lbl)
+        w1 = w1.line(*n_gon(8, r, i), lbl)
+        w2 = w2.line(*n_gon(8, r, i), lbl)
     w1 = w1.close()
     w2 = w2.close()
     w1.chip()
@@ -109,13 +110,13 @@ def lower():
     rect_forward(
         t.back(board_thickness / 2).up(hinge_radius).nose_down(90),
         skel_width - 2 * board_thickness,
-        stab_d,
+        stab_d - pin_diameter / 2,
     ).chip()
 
     rect_forward(
         t.forward(board_thickness / 2).down(skel_len + hinge_radius).nose_up(90),
         skel_width - 2 * board_thickness,
-        stab_d,
+        stab_d - pin_diameter / 2,
     ).chip()
 
     # foot

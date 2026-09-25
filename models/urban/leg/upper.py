@@ -1,10 +1,16 @@
 from leg.lower import lower
-from shared import board_thickness, hinge_radius, hip_dowel_diameter
+from shared import (
+    board_thickness,
+    hinge_radius,
+    hip_dowel_diameter,
+    upper_leg_height,
+    upper_leg_width,
+)
 
 from flatpack import t
 
-skel_width = 1.5
-skel_len = 3
+skel_width = upper_leg_width
+skel_len = upper_leg_height - hinge_radius / 2
 taper_len = 1.75
 straight_len = skel_len - taper_len
 taper_depth = 0.75
@@ -39,15 +45,21 @@ def _plate(width, depth):
 def upper():
     t_left = t.left(skel_width / 2).nose_right(90).nose_down(90)
     w_left = _riser_wire(t_left)
-    (w_left + t_left.circle(0, skel_len, hinge_radius)).chip()
+    (w_left + t_left.circle(0, skel_len, hinge_radius)).chip(
+        punch=["hip-dowel", "knee-pin"], no_punch="hip-pin"
+    )
 
     t_right = t.right(skel_width / 2).nose_left(90).nose_down(90)
     w_right = _riser_wire(t_right)
-    (w_right + t_right.circle(0, skel_len, hinge_radius)).chip()
+    (w_right + t_right.circle(0, skel_len, hinge_radius)).chip(
+        punch=["hip-dowel", "knee-pin"], no_punch="hip-pin"
+    )
 
-    # top/bottom/mid
+    # top/mid/bottom cross plates
     t.down(board_thickness).back(taper_depth / 2).place(_plate, skel_width, taper_depth)
-    t.down(taper_len).back(skel_depth / 2).place(_plate, skel_width, skel_depth)
+    t.down(taper_len + board_thickness).back(skel_depth / 2).place(
+        _plate, skel_width, skel_depth
+    )
     t.down(skel_len).back(skel_depth / 2).place(_plate, skel_width, skel_depth)
 
     # braces
@@ -55,7 +67,7 @@ def upper():
     t.down(board_thickness * 2).back(taper_depth / 2).place(
         _plate, inner_w, taper_depth
     )
-    t.down(board_thickness * 2 + hip_dowel_diameter).back(taper_depth / 2).place(
+    t.down(board_thickness * 3 + hip_dowel_diameter).back(taper_depth / 2).place(
         _plate, inner_w, taper_depth
     )
 

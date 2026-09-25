@@ -26,7 +26,7 @@ setup(thickness=1/8)
 
 def shin():
     outline = (t.wire().jump(-1/2, 0).line(1/2, 0).line(1/2, 4)
-               .arc(0, 4, 1/2, 90, -90)             # rounded end
+               .arc(0, 4, -180)                     # rounded end
                .close())
     (outline - t.circle(0, 4, 1/8)).chip()
 
@@ -68,8 +68,9 @@ t.frame(o1.world("v0"), o1.world("v1"), o2.world("v0")).place(panel)
 ```
 
 **Parts** are plain functions. `turtle.place(part)` runs one, and any extra
-arguments go to the part: `edge.place(slat, width)`. Calling a part twice
-stamps it twice. Names come from the call path
+arguments go to the part: `edge.place(slat, width)`. `place` returns whatever
+the part returns, such as a turtle to attach the next part to:
+`knee = t.place(thigh)`. Calling a part twice stamps it twice. Names come from the call path
 (`stool/leg#2`), and you never type them.
 
 **Wires** are drawn in the turtle's XY plane. Coordinates are relative to that
@@ -78,10 +79,10 @@ turtle, not to the last pen position.
 - `jump(x, y)` starts the wire. `line(x, y)` draws a straight segment.
 - `jump`, `line` and `arc` take an optional last argument that names the point
   they end on: `.line(0, width, "A")`.
-- `arc(x, y, r, a, b)` goes around center (x, y) from bearing a to bearing b.
-  Bearings are degrees clockwise from turtle-forward (0 = forward, 90 = right).
-  a < b sweeps clockwise. If the pen isn't at the arc's start, a line joins it
-  there.
+- `arc(x, y, degrees)` swings the pen around center (x, y), keeping its
+  current distance from it. Positive degrees go clockwise, negative
+  counterclockwise, -360 to 360; 0 draws nothing (handy in loops). The arc
+  always starts where the pen is, so it can't begin a wire.
 - `close()` draws the last segment back to the start and gives you an outline.
 - `t.circle(x, y, r)` is a ready-made circular outline.
 
@@ -133,6 +134,13 @@ def hips():
   the chip, a punch that misses the chip, or one that cuts the chip in two.
 - The live view draws each punch as a see-through rod across the chips it cut.
   A punch no chip uses is drawn orange and listed in the panel.
+- Every punch's rod is also checked against every chip that *didn't* ask for
+  it. Wherever it actually passes through material, the overlap is drawn red
+  (in Clashes) and listed in the panel with both line numbers. Touching a face
+  doesn't count. `./fp check` reports these and exits non-zero.
+- For a chip a punch is *meant* to reach without cutting, like a cap over a
+  dowel end, use `.chip(no_punch="hip-dowel")`. It's left out of that punch's
+  check and gets no hole.
 
 ## Live view
 

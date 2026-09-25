@@ -63,12 +63,14 @@ def cmd_check(args):
     bad = [n for n, sh in solids.items() if not sh.isValid()]
     for n in bad:
         print(f"invalid solid: {n} ({m[n].source})")
+    for text, _ in m.warnings:
+        print(f"warning: {text}")
     found = solid.clashes(solids)
     for c in found:
         what = f"check failed: {c.error}" if c.error else f"{c.volume:.0f} mm³"
         print(f"clash: {c.a} x {c.b}  {what}  ({m[c.a].source}, {m[c.b].source})")
-    print(f"{len(solids)} solids, {len(found)} clash(es)")
-    return 1 if (bad or found) else 0
+    print(f"{len(solids)} solids, {len(found)} clash(es), {len(m.warnings)} warning(s)")
+    return 1 if (bad or found or m.warnings) else 0
 
 
 def cmd_live(args):

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from flatpack import turtle as T  # noqa: E402
 from flatpack.turtle import DSLError, Turtle  # noqa: E402
-from shapely.geometry import Point  # noqa: E402
+from shapely.geometry import Point, Polygon  # noqa: E402
 
 O = Turtle()
 
@@ -209,20 +209,26 @@ def test_mirrored_chip_is_reflection():
 
 # -- wires ----------------------------------------------------------------------
 
-def test_arc_bearings():
-    w = O.wire().arc(0, 0, 1, 0, 90)
-    assert close(w.pts[0], [0, 1]) and close(w.pts[-1], [1, 0])  # forward -> right: clockwise
+def test_arc():
+    w = O.wire().jump(0, 1).arc(0, 0, 90)                        # forward -> right: clockwise
+    assert close(w.pts[-1], [1, 0])
     mid = w.pts[len(w.pts) // 2]
-    assert mid[0] > 0 and mid[1] > 0
-    w = O.wire().arc(0, 0, 1, 90, 0)                             # same arc, backwards
-    assert close(w.pts[0], [1, 0]) and close(w.pts[-1], [0, 1])
-    w = O.wire().arc(0, 0, 1, 90, -90)                           # over the top
-    assert max(p[1] for p in w.pts) > 0.999
+    assert mid[0] > 0 and mid[1] > 0 and abs(math.hypot(*mid) - 1) < 1e-12
+    w = O.wire().jump(1, 0).arc(0, 0, -90)                       # right -> forward: counterclockwise
+    assert close(w.pts[-1], [0, 1])
+    w = O.wire().jump(1 / 2, 4).arc(0, 4, -180)                   # radius from the pen: 1/2
+    assert close(w.pts[-1], [-1 / 2, 4]) and max(p[1] for p in w.pts) >= 4.5 - T.ARC_TOLERANCE
+    w = O.wire().jump(3, 4).arc(0, 0, 360)                       # full turn ends where it began
+    assert close(w.pts[-1], [3, 4])
+    w = O.wire().jump(1, 0).arc(0, 0, 0, "here")                 # 0 is a no-op; still names the point
+    assert w.pts == ((1.0, 0.0),) and w.point("here") == (1.0, 0.0)
 
 
-def test_arc_joins_with_line():
-    w = O.wire().jump(-3, 0).arc(0, 0, 1, 270, 90)
-    assert close(w.pts[0], [-3, 0]) and close(w.pts[1], [-1, 0])
+def test_arc_errors():
+    raises(lambda: O.wire().arc(0, 0, 90), "begin the wire with jump")
+    raises(lambda: O.wire().jump(0, 0).arc(0, 0, 90), "needs a radius")
+    raises(lambda: O.wire().jump(1, 0).arc(0, 0, 361), "between -360 and 360")
+    raises(lambda: O.wire().jump(1, 0).arc(0, 0, -400), "between -360 and 360")
 
 
 def test_circle():
@@ -257,6 +263,22 @@ def test_subtract_needs_same_plane():
     outer = O.wire().jump(0, 0).line(1, 0).line(1, 1).close()
     raises(lambda: outer - O.up(0.1).circle(0, 0, 0.1), "same plane")
     raises(lambda: outer - O.nose_up(5).circle(0, 0, 0.1), "same plane")
+
+
+def test_no_slivers_at_odd_angles():
+    # Cutting flush with an edge from a turtle at an odd angle used to leave a
+    # 1e-65 in² sliver that counted as a second piece.
+    rect = lambda tt, w, h: tt.wire().jump(-w / 2, 0).line(-w / 2, h).line(w / 2, h).line(w / 2, 0).close()
+    for angle in (45, 30, 17.3, 60):
+        base = O.up(0.5).nose_right(angle)
+        big = rect(base.left(0.625).nose_down(90).down(1 / 16), 1.25, 0.375)
+        cut = rect(base.nose_down(90).down(1 / 16), 0.625, 0.375)
+        r = big - cut
+        assert isinstance(r.geom, Polygon), (angle, r.geom.geom_type)
+        assert abs(r.geom.area - 0.9375 * 0.375) < 1e-9
+    # a genuinely separate piece is still two pieces
+    both = rect(O, 1, 1) + rect(O.right(3), 1, 1)
+    assert both.geom.geom_type == "MultiPolygon"
 
 
 def test_two_piece_chip():
@@ -448,6 +470,67 @@ def test_punch_mirrored_chip_and_unused():
     assert on_line(h, np.array([-1, 0, 0]), np.array([0, 0, 1.0]))
     unused = sorted(r.name for r in m.punches if not r.used)
     assert unused == ["both/side#1/spare", "both/side#2/spare"]
+
+
+def test_place_returns_what_the_part_returns():
+    def thigh():
+        shape = T.t.wire().jump(0, 0).line(0, 4, "knee").line(1, 4).line(1, 0).close()
+        shape.chip()
+        return shape.at("knee")
+
+    def leg():
+        knee = T.t.right(2).place(thigh)
+        assert close(knee.pos, [2, 4, 0])      # a real world-space turtle, usable anywhere
+        knee.nose_up(30).place(plate)
+        assert T.t.place(lambda: None) is None
+
+    m = build(leg)
+    assert set(m.chips) == {"leg/thigh", "leg/plate"}
+
+
+def test_untagged_punch_hits_are_flagged():
+    def stack():
+        T.t.nose_up(90).punch(1 / 8, "dowel")                 # vertical line through the origin
+        T.t.place(plate, "dowel")
+        T.t.up(2).place(plate, "dowel")                      # rod spans z = -1/4 .. 2 3/8
+        T.t.up(1).place(plate)                               # in the middle, untagged: flagged
+        T.t.up(1 / 2).right(3).place(plate, None, 1)         # beside the rod: fine
+        T.t.up(6).place(plate)                               # on the line but past the rod: fine
+        # a plate standing on edge, with the rod running through it lengthwise
+        T.t.up(1 / 2).nose_up(90).place(plate, None, 1)
+
+        # a rail along x at y = 3: plates lying along it may touch it but not sink into it
+        rail = T.t.forward(3)
+        rail.nose_right(90).punch(1 / 4, "rail")
+        rail.roll_right(90).place(plate, "rail", 1)                  # end plates, tagged: the
+        rail.right(2).roll_right(90).place(plate, "rail", 1)         # rod spans x = -1/4 .. 2 3/8
+        rail.right(1).up(1 / 4).place(plate, None, 1)                # rests on top: touching
+        rail.right(1).up(1 / 4 - 0.02).place(plate, None, 1)         # sunk 0.02": flagged
+
+    m = build(stack)
+    hit = sorted(ids[0] for _, ids in m.warnings)
+    assert hit == ["chip:stack/plate#10", "chip:stack/plate#3", "chip:stack/plate#6"], hit
+    text = m.warnings[0][0]
+    assert "stack/dowel" in text and "isn't tagged" in text and "test_dsl.py" in text
+
+
+def test_no_punch_exempts_a_chip():
+    def capped(**kw):
+        (T.t.wire().jump(-1, -1).line(1, -1).line(1, 1).line(-1, 1).close()).chip(**kw)
+
+    def box(**cap):
+        T.t.nose_up(90).punch(1 / 4, "dowel")
+        T.t.place(plate, "dowel")
+        T.t.up(2).place(plate, "dowel")
+        T.t.up(2 + 1 / 8).place(capped, **cap)          # cap right on the dowel's end
+
+    m = build(lambda: box())
+    assert [ids[0] for _, ids in m.warnings] == ["chip:part/capped"]
+    m = build(lambda: box(no_punch="dowel"))
+    assert m.warnings == []
+    assert len(m.chips["part/capped"].geom.interiors) == 0          # not cored
+    raises(lambda: build(lambda: box(no_punch="dowl")), "no punch named 'dowl'")
+    raises(lambda: build(lambda: box(punch="dowel", no_punch="dowel")), "in both punch= and no_punch=")
 
 
 def test_thickness_chin_to_eyes():

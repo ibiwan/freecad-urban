@@ -1,6 +1,23 @@
+from math import cos, pi, sin
+
 board_thickness = 1 / 8
 hinge_radius = 0.5
+pin_diameter = 0.125
 hip_dowel_diameter = 0.75
+shoulder_dowel_diameter = 0.75
+waist_hinge_diameter = 1.25
+
+foot_height = 1.375  # ground to ankle pin
+lower_leg_height = 2.375  # ankle pin to knee pin
+upper_leg_height = 3.5  # knee pin to leg top
+upper_leg_width = 1.5
+hinge_box_height = 0.25
+
+
+def n_gon(n, r, i, inradius=False):
+    R = r / cos(pi / n) if inradius else r
+    theta = 2 * pi / n * i
+    return (R * cos(theta), R * sin(theta))
 
 
 def rect_forward(tt, w, d):
@@ -12,9 +29,9 @@ def rect_forward(tt, w, d):
 def rect_around(tt, w, d):
     return (
         tt.wire()
-        .jump(-w / 2, -d / 2)
-        .line(-w / 2, d / 2)
-        .line(w / 2, d / 2)
-        .line(w / 2, -d / 2)
+        .jump(-w / 2, -d / 2, "A")
+        .line(-w / 2, d / 2, "B")
+        .line(w / 2, d / 2, "C")
+        .line(w / 2, -d / 2, "D")
         .close()
     )

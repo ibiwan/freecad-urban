@@ -1,10 +1,10 @@
-from shared import board_thickness, hinge_radius
+from shared import board_thickness, foot_height, hinge_radius, rect_forward
 
 from flatpack import t
 
 
 def foot():
-    height = 1.125
+    height = foot_height - hinge_radius / 2
     width = 1.5
     length = 2.25
 
@@ -35,12 +35,14 @@ def foot():
         c = tt.circle(0, width / 2, hinge_radius)
         return w + c
 
-    vertical(t.back(width / 2).left(width / 2).roll_right(90), True).chip()
+    vertical(t.back(width / 2).left(width / 2).roll_right(90), True).chip(
+        punch="ankle-pin"
+    )
     v = vertical(t.back(width / 2).left(board_thickness / 2).roll_right(90))
     v.chip()
     vertical(
         t.back(width / 2).right(width / 2).roll_right(90).down(board_thickness), True
-    ).chip()
+    ).chip(punch="ankle-pin")
 
     len = v.distance("A", "B")
 
@@ -57,7 +59,7 @@ def foot():
 
     v.on_edge("A", "B").right(board_thickness / 2).place(instep)
 
-    spar_w = width / 2 - board_thickness
+    spar_w = width - 2 * board_thickness
 
     def spar(tt):
         return (
@@ -70,8 +72,13 @@ def foot():
             .close()
         )
 
-    def spar1():
-        spar(t).chip()
-
-    t.back(hinge_radius).nose_down(90).place(spar1)
-    t.forward(hinge_radius - board_thickness).nose_down(90).place(spar1)
+    rect_forward(
+        t.forward(hinge_radius - board_thickness).nose_down(90),
+        spar_w,
+        height - board_thickness,
+    ).chip()
+    rect_forward(
+        t.back(hinge_radius).nose_down(90), spar_w, height - board_thickness
+    ).chip()
+    # spar(t.back(hinge_radius).nose_down(90)).chip()
+    # spar(t.forward(hinge_radius - board_thickness).nose_down(90)).chip()

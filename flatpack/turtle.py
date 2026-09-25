@@ -11,13 +11,13 @@ with.
         knee.up(5/8).place(shin)
 
     def shin():
-        outline = t.wire().jump(0, 0).line(1, 0).line(1, 4).arc(1/2, 4, 1/2, 90, -90).close()
+        outline = t.wire().jump(0, 0).line(1, 0).line(1, 4).arc(1/2, 4, -180).close()
         (outline - t.circle(1/2, 4, 1/8)).chip()
 
 Wires are drawn in the turtle's XY plane with coordinates relative to that
-turtle, never to the last pen position. Arc angles are compass bearings:
-clockwise from turtle-forward, so 0 = forward, 90 = right. The arc sweeps from
-a to b (a < b is clockwise). A chip's thickness runs from the turtle's z=0 up
+turtle, never to the last pen position. arc(x, y, degrees) swings the pen
+around center (x, y) at its current distance: positive degrees clockwise,
+negative counterclockwise. A chip's thickness runs from the turtle's z=0 up
 to z=thickness.
 """
 from __future__ import annotations
@@ -30,7 +30,9 @@ from pathlib import Path
 
 import numpy as np
 from shapely import affinity
-from shapely.geometry import LineString, Point, Polygon
+import shapely
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
+from shapely.ops import unary_union
 from shapely.validation import explain_validity
 
 _PKG_DIR = Path(__file__).resolve().parent
@@ -38,6 +40,10 @@ _PKG_DIR = Path(__file__).resolve().parent
 # Largest allowed gap between a true arc and its polyline (inches, ~0.025mm).
 ARC_TOLERANCE = 0.001
 _EPS = 1e-9
+# Outline booleans: points this close (inches) are snapped together, and
+# pieces or holes smaller than this (square inches) are rounding noise.
+SNAP = 1e-9
+SLIVER = 1e-9
 
 
 class DSLError(Exception):
@@ -199,17 +205,20 @@ class Turtle:
 
     # -- building --
     def place(self, part, *args, **kwargs):
-        """Run a part function with this turtle as its `t`. Extra arguments go to the part."""
+        """Run a part function with this turtle as its `t`. Extra arguments go to the part.
+
+        Returns whatever the part returns, e.g. a turtle to attach the next part to.
+        """
         if not callable(part):
             raise DSLError(f"place() needs a part function, got {part!r}")
-        _build().run_part(self, part, args, kwargs)
+        return _build().run_part(self, part, args, kwargs)
 
     def wire(self):
         return Wire(self)
 
     def circle(self, x, y, r):
         """A closed circular outline centered at (x, y) in this turtle's plane."""
-        return Wire(self).arc(x, y, r, 0, 360).close()
+        return Wire(self).jump(x, y + r).arc(x, y, 360).close()
 
     @property
     def matrix(self):
@@ -288,24 +297,32 @@ class Wire:
             raise DSLError("line() needs a starting point: begin the wire with jump(x, y)")
         return self._add((x, y), name=name)
 
-    def arc(self, x, y, r, a, b, name=None):
-        """Arc around center (x, y), radius r, from bearing a to bearing b.
+    def arc(self, x, y, degrees, name=None):
+        """Swing the pen around center (x, y), keeping its distance from the center.
 
-        Bearings are degrees clockwise from turtle-forward. If the pen isn't
-        already at the arc's start, a straight line joins it there. name labels
-        the arc's end point.
+        The batmobile arc: (x, y) is the lamp post, the grappling line from the
+        pen to it sets the radius, and degrees is how far you swing.
+
+        degrees > 0 turns clockwise (seen from the turtle's up), < 0 counter-
+        clockwise; -360 to 360, and 0 draws nothing. The radius is however far
+        the pen is from the center, so the arc always starts where the pen is.
         """
-        if r <= 0:
-            raise DSLError(f"arc radius must be positive, got {r}")
-        sweep = math.radians(b - a)
-        if sweep == 0:
-            raise DSLError("arc start and end angles are the same")
+        if not self.pts:
+            raise DSLError("arc() continues from the pen: begin the wire with jump(x, y)")
+        if not -360 <= degrees <= 360:
+            raise DSLError(f"arc degrees must be between -360 and 360, got {degrees}")
+        px, py = self.pts[-1]
+        r = math.hypot(px - x, py - y)
+        if r < _EPS:
+            raise DSLError("arc center is where the pen already is; it needs a radius")
+        if degrees == 0:
+            return self._add(name=name)
+        start = math.atan2(px - x, py - y)       # bearing: clockwise from forward
+        sweep = math.radians(degrees)
         step = 2 * math.acos(max(-1.0, 1 - ARC_TOLERANCE / r)) if r > ARC_TOLERANCE else math.pi / 2
         n = max(2, math.ceil(abs(sweep) / step))
-        pts = []
-        for i in range(n + 1):
-            th = math.radians(a) + sweep * i / n
-            pts.append((x + r * math.sin(th), y + r * math.cos(th)))
+        pts = [(x + r * math.sin(start + sweep * i / n), y + r * math.cos(start + sweep * i / n))
+               for i in range(1, n + 1)]
         return self._add(*pts, name=name)
 
     def close(self):
@@ -319,6 +336,15 @@ class Wire:
         if not poly.is_valid:
             raise DSLError(f"wire crosses itself ({explain_validity(poly)})")
         return Outline(self.frame, poly, self.names)
+
+
+def _clean(g):
+    """Drop sliver pieces and holes that are only rounding noise."""
+    polys = [p for p in getattr(g, "geoms", [g]) if isinstance(p, Polygon) and p.area > SLIVER]
+    polys = [Polygon(p.exterior, [r for r in p.interiors if Polygon(r).area > SLIVER]) for p in polys]
+    if not polys:
+        return Polygon()
+    return polys[0] if len(polys) == 1 else MultiPolygon(polys)
 
 
 class Outline:
@@ -395,7 +421,10 @@ class Outline:
 
     def _combine(self, other, op):
         a, b, d, e, xoff, yoff = tf = self._transform(other)
-        geom = op(self.geom, affinity.affine_transform(other.geom, tf))
+        # Rounding (turns at odd angles especially) leaves "lined up" edges a
+        # hair apart; snap them together, then drop the slivers that survive.
+        theirs = shapely.snap(affinity.affine_transform(other.geom, tf), self.geom, SNAP)
+        geom = _clean(op(self.geom, theirs))
         names = {n: (a * x + b * y + xoff, d * x + e * y + yoff) for n, (x, y) in other.names.items()}
         names.update(self.names)          # on a clash, the left side's point wins
         return Outline(self.frame, geom, names)
@@ -409,10 +438,12 @@ class Outline:
     def __and__(self, other):
         return self._combine(other, lambda g, o: g.intersection(o))
 
-    def chip(self, name=None, thickness=None, punch=None):
+    def chip(self, name=None, thickness=None, punch=None, no_punch=None):
         """Stamp this outline as a chip, thickness growing along the turtle's up.
 
         punch: a punch name, or a list of them, to cut holes through this chip.
+        no_punch: punches that reach this chip on purpose but mustn't cut it
+        (a cap over a dowel end); they're left out of the untagged-punch check.
         """
         g = self.geom
         if g.is_empty:
@@ -420,8 +451,12 @@ class Outline:
         if not isinstance(g, Polygon):
             n = len(getattr(g, "geoms", []))
             raise DSLError(f"chip outline is in {n} separate pieces; a chip must be one piece")
-        tags = [] if punch is None else [punch] if isinstance(punch, str) else list(punch)
-        _build().add_chip(self.frame, g, name, thickness, _caller(), tags)
+        as_list = lambda v: [] if v is None else [v] if isinstance(v, str) else list(v)
+        tags, skips = as_list(punch), as_list(no_punch)
+        both = sorted(set(tags) & set(skips))
+        if both:
+            raise DSLError(f"{', '.join(map(repr, both))} is in both punch= and no_punch=")
+        _build().add_chip(self.frame, g, name, thickness, _caller(), tags, skips)
 
 
 # -- build context -------------------------------------------------------------
@@ -462,13 +497,54 @@ class PunchRod:
 PUNCH_OVERHANG = 1 / 4   # rod drawn this far past the outermost chips it cut
 
 
+def _rod_hits_chip(rod, frame, geom, thickness, min_depth=1e-3):
+    """Does a punch's rod pass through a chip's material (outside any hole it already has)?
+
+    Works on the rod's true cross-section inside the chip's thickness, so a rod
+    that only touches a face (tangent) doesn't count.
+    """
+    inv = frame.rot.T
+    a = inv @ (rod.p0 - frame.pos)
+    b = inv @ (rod.p1 - frame.pos)
+    d = b - a
+    length = np.linalg.norm(d)
+    if length < _EPS:
+        return False
+    n = d / length
+    if abs(n[2]) < 1e-9:
+        # Parallel to the chip: a strip as wide as the rod is inside the thickness.
+        z = min(max(a[2], 0.0), thickness)           # depth in the chip nearest the axis
+        gap = abs(z - a[2])
+        if rod.r - gap < min_depth:
+            return False
+        half = math.sqrt(rod.r ** 2 - gap ** 2)
+        footprint = LineString([a[:2], b[:2]]).buffer(half, cap_style="flat")
+    else:
+        # Crossing it: union of the rod's elliptical sections at a few depths.
+        cos_t = abs(n[2])
+        heading = math.degrees(math.atan2(n[1], n[0]))
+        sections = []
+        for z in np.linspace(min_depth, thickness - min_depth, 5):
+            u = (z - a[2]) / d[2]
+            if not 0.0 <= u <= 1.0:
+                continue
+            c = a + d * u
+            e = affinity.scale(Point(0, 0).buffer(rod.r, quad_segs=16), 1 / cos_t, 1)
+            sections.append(affinity.translate(affinity.rotate(e, heading, origin=(0, 0)), c[0], c[1]))
+        if not sections:
+            return False
+        footprint = unary_union(sections)
+    # A sliver of overlap is faceting noise from the polygonal holes.
+    return geom.intersection(footprint).area > 1e-4
+
+
 class Build:
     def __init__(self, name):
         self.name = name
         self.thickness = 1 / 8
         self.stack = [(Turtle(), ())]   # (turtle, path); a path is ((name, k), ...)
         self.counts = Counter()         # (parent path, part name) -> times placed
-        self.raw = []                   # (path, name, frame, geom, thickness, source, punch tags)
+        self.raw = []                   # (path, name, frame, geom, thickness, source, punch tags, no_punch tags)
         self.entries = []               # (path, turtle) each time a part is entered
         self.punches = []               # PunchDef
 
@@ -485,14 +561,14 @@ class Build:
         self.entries.append((path, turtle))
         self.stack.append((turtle, path))
         try:
-            part(*args, **(kwargs or {}))
+            return part(*args, **(kwargs or {}))
         finally:
             self.stack.pop()
 
-    def add_chip(self, frame, geom, name, thickness, source, tags=()):
+    def add_chip(self, frame, geom, name, thickness, source, tags=(), skips=()):
         self.raw.append((self.stack[-1][1], name, frame, geom,
                          self.thickness if thickness is None else float(thickness), source,
-                         list(tags)))
+                         list(tags), list(skips)))
 
     def add_punch(self, turtle, r, name, source):
         path = self.stack[-1][1]
@@ -521,10 +597,10 @@ class Build:
         o = inv @ (p.origin - frame.pos)
         u = -o[2] / axis[2]                        # where the axis meets the chip's z=0 plane
         x, y = o[0] + u * axis[0], o[1] + u * axis[1]
-        hole = Wire(Turtle()).arc(x, y, p.r, 0, 360).close().geom
+        hole = Wire(Turtle()).jump(x, y + p.r).arc(x, y, 360).close().geom
         if not geom.intersects(hole):
             raise DSLError(f"{where}: punch {p.name!r} ({p.source}) misses this chip")
-        cut = geom.difference(hole)
+        cut = _clean(geom.difference(hole))
         if not isinstance(cut, Polygon):
             n = len(getattr(cut, "geoms", []))
             raise DSLError(f"{where}: punch {p.name!r} cuts this chip into {n} pieces")
@@ -547,14 +623,21 @@ class Build:
         per_path = Counter(p for p, *_ in self.raw)
         seen = Counter()
         chips = {}
-        for path, name, frame, geom, thickness, source, tags in self.raw:
-            for tag in tags:
+        placed = []   # (name, raw frame, punched outline, thickness, source, punches it asked for)
+        for path, name, frame, geom, thickness, source, tags, skips in self.raw:
+            def resolve(tag):
                 p = self._find_punch(tag, path)
                 if p is None:
                     visible = sorted({q.name for q in self.punches if path[:len(q.path)] == q.path})
                     raise DSLError(f"{source}: no punch named {tag!r} is visible here "
                                    f"(visible: {', '.join(visible) or 'none'})")
+                return p
+            asked = []
+            for tag in tags:
+                p = resolve(tag)
                 geom = self._apply_punch(p, frame, geom, thickness, source)
+                asked.append(p)
+            asked += [resolve(tag) for tag in skips]   # exempt from the cross-check, not cut
             base = path_str(path)
             seen[path] += 1
             if name is None and per_path[path] == 1:
@@ -567,6 +650,7 @@ class Build:
                 while f"{full}#{k}" in chips:
                     k += 1
                 full = f"{full}#{k}"
+            placed.append((full, frame, geom, thickness, source, asked))
 
             rot, mirrored = frame.rot, np.linalg.det(frame.rot) < 0
             if mirrored:
@@ -583,22 +667,34 @@ class Build:
         # part's marker shows its x axis pointing the other way.
         markers = [(path_str(path), turtle.matrix) for path, turtle in self.entries]
         rods = []
+        warnings = []
         for p in self.punches:
             lo, hi = (min(p.hits), max(p.hits)) if p.hits else (0.0, 0.0)
             full = f"{path_str(p.path)}/{p.name}" if p.path else p.name
-            rods.append(PunchRod(full, p.r, p.origin + p.axis * (lo - PUNCH_OVERHANG),
-                                 p.origin + p.axis * (hi + PUNCH_OVERHANG), p.source, bool(p.hits)))
-        return Model(self.name, chips, markers, rods)
+            rod = PunchRod(full, p.r, p.origin + p.axis * (lo - PUNCH_OVERHANG),
+                           p.origin + p.axis * (hi + PUNCH_OVERHANG), p.source, bool(p.hits))
+            rods.append(rod)
+            if not rod.used:
+                continue
+            for cname, frame, geom, thickness, csource, asked in placed:
+                if any(q is p for q in asked):
+                    continue
+                if _rod_hits_chip(rod, frame, geom, thickness):
+                    warnings.append((f"punch {full} ({p.source}) passes through {cname} "
+                                     f"({csource}), which isn't tagged with it",
+                                     [f"chip:{cname}", f"punch:{full}"]))
+        return Model(self.name, chips, markers, rods, warnings)
 
 
 class Model:
     """What a model file produces: named chips, ready for the live view, clash check and nester."""
 
-    def __init__(self, name, chips, markers=(), punches=()):
+    def __init__(self, name, chips, markers=(), punches=(), warnings=()):
         self.name = name
         self.chips = chips
-        self.markers = list(markers)  # (part name, 4x4 entry turtle), one per place()
-        self.punches = list(punches)  # PunchRod, for drawing
+        self.markers = list(markers)    # (part name, 4x4 entry turtle), one per place()
+        self.punches = list(punches)    # PunchRod, for drawing
+        self.warnings = list(warnings)  # (message, [live-view ids to select])
 
     def __repr__(self):
         return f"<Model {self.name}: {len(self.chips)} chips>"

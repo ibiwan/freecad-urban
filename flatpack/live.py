@@ -88,16 +88,20 @@ class Panel(QtWidgets.QDockWidget):
         self.file.setWordWrap(True)
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
+        self.notice = QtWidgets.QLabel()
+        self.notice.setWordWrap(True)
+        self.notice.hide()
         self.list = QtWidgets.QListWidget()
         self.list.setWordWrap(True)
         self.list.itemDoubleClicked.connect(self._select)
         row = QtWidgets.QHBoxLayout()
-        for label, fn in (("Rebuild", session.rebuild), ("Open model…", session.choose),
-                          ("Stop", session.stop)):
+        for label, fn in (("Rebuild", session.rebuild), ("Restart", session.restart),
+                          ("Open model…", session.choose), ("Stop", session.stop)):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(fn)
             row.addWidget(b)
         lay.addWidget(self.file)
+        lay.addWidget(self.notice)
         lay.addWidget(self.status)
         lay.addWidget(self.list, 1)
         lay.addLayout(row)
@@ -127,6 +131,7 @@ class Session:
         Gui.getMainWindow().addDockWidget(QtCore.Qt.RightDockWidgetArea, self.panel)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.poll)
+        self.own_stamp = self._own_stamp()
 
     # -- lifecycle -------------------------------------------------------
     def start(self):
@@ -142,6 +147,22 @@ class Session:
         if getattr(Gui, "_flatpack_live", None) is self:
             Gui._flatpack_live = None
         App.Console.PrintMessage("Flatpack live view stopped\n")
+
+    def restart(self):
+        """Reload the live view's own code (which a rebuild can't) and carry on watching."""
+        path = str(self.model_path)
+        self.stop()
+        for name in [n for n in sys.modules if n == "flatpack" or n.startswith("flatpack.")]:
+            del sys.modules[name]
+        import flatpack.live
+        QtCore.QTimer.singleShot(0, lambda: flatpack.live.main(path))
+
+    @staticmethod
+    def _own_stamp():
+        try:
+            return Path(__file__).stat().st_mtime_ns
+        except OSError:
+            return None
 
     def choose(self):
         path = ask_model(self.model_path)
@@ -169,6 +190,10 @@ class Session:
         return out
 
     def poll(self):
+        if self.panel.notice.isHidden() and self._own_stamp() != self.own_stamp:
+            self.panel.notice.setText("<b style='color:#d98200'>The live view's own code changed. "
+                                      "Click Restart to pick it up.</b>")
+            self.panel.notice.show()
         now = self._stamps()
         if now != self.stamps:
             # Editors often save in several steps; wait for one quiet tick.
@@ -193,7 +218,12 @@ class Session:
             axes = solid.marker_axes(model)
             labels = solid.marker_labels(model)
             rods = solid.punch_rods(model)
-            self._sync(model, solids, clashes, axes, labels, rods)
+            rod_shapes = {name: rod for name, rod, _ in rods}
+            punch_hits = []   # (chip, punch, overlap solid) for untagged punch hits
+            for _, ids in model.warnings:
+                chip, punch = ids[0][len("chip:"):], ids[1][len("punch:"):]
+                punch_hits.append((chip, punch, rod_shapes[punch].common(solids[chip])))
+            self._sync(model, solids, clashes, axes, labels, rods, punch_hits)
         except Exception as e:
             self._show_error(e)
             return
@@ -201,13 +231,17 @@ class Session:
         unused = [p for p in model.punches if not p.used]
         head = (f"✓ {len(model.chips)} chips, {len(model.punches)} punches, {len(model.markers)} part entries "
                 f"({dt:.1f}s, {time.strftime('%H:%M:%S')})")
-        items = [(f"⚠ punch {p.name} isn't used by any chip   {p.source}", [f"punch:{p.name}"])
-                 for p in unused]
+        items = [(f"⚠ {text}", ids + [f"clash:punch|{ids[0][5:]}|{ids[1][6:]}"])
+                 for text, ids in model.warnings]
+        items += [(f"⚠ punch {p.name} isn't used by any chip   {p.source}", [f"punch:{p.name}"])
+                  for p in unused]
         for c in clashes:
             what = f"failed to check: {c.error}" if c.error else f"{c.volume:.0f} mm³"
             src = [model[n].source for n in (c.a, c.b)]
             items.append((f"✕ {c.a}  ×  {c.b}   {what}\n    {src[0]}, {src[1]}",
                           [f"chip:{c.a}", f"chip:{c.b}", f"clash:{c.a}|{c.b}"]))
+        if model.warnings:
+            head += f"<br>{len(model.warnings)} untagged punch hit{'s' if len(model.warnings) != 1 else ''}"
         if clashes:
             head += f"<br>{len(clashes)} clash{'es' if len(clashes) != 1 else ''} (double-click to select)"
         self.panel.show_result(True, head, items)
@@ -237,7 +271,7 @@ class Session:
             doc = App.newDocument(name, temp=True)
         return doc
 
-    def _sync(self, model, solids, clashes, axes, labels, rods):
+    def _sync(self, model, solids, clashes, axes, labels, rods, punch_hits=()):
         doc = self._doc(model)
         have = {o.FlatpackId: o for o in doc.Objects if hasattr(o, "FlatpackId")}
         keep = set()
@@ -312,6 +346,9 @@ class Session:
         for c in clashes:
             if c.shape is not None:
                 put(f"clash:{c.a}|{c.b}", f"{c.a} × {c.b}", c.shape, CLASH, "", ["Clashes"])
+        for chip, punch, shape in punch_hits:
+            put(f"clash:punch|{chip}|{punch}", f"{punch} through untagged {chip}", shape, CLASH, "",
+                ["Clashes"])
         for fid, obj in list(have.items()):
             if fid not in keep:
                 try:

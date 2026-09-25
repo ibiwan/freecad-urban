@@ -26,7 +26,7 @@ def leg():
         .jump(-5 / 4, 0)
         .line(5 / 4, 0)
         .line(5 / 4, 5 / 2)
-        .arc(0, 5 / 2, 5 / 4, 90, -90)  # rounded top, over the forward side
+        .arc(0, 5 / 2, -180)  # rounded top, over the forward side
         .close()
     )
     (outline - stand.circle(0, 5 / 2, 1 / 4)).chip()
